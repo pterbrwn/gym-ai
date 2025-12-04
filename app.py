@@ -4,6 +4,7 @@ import ollama
 import pandas as pd
 from datetime import date
 import time
+import coach
 
 # --- CONFIGURATION ---
 DB_NAME = 'gym_data.db'
@@ -306,31 +307,28 @@ with tab2:
 
 # --- TAB 3: COACH ---
 with tab3:
-    st.header("🧠 Post-Workout Analysis")
+    st.header("🧠 Performance Review")
+    
+    # Show a "Profile Badge" so you know the AI knows who you are
+    st.caption("Athlete Profile: D1 Soccer / 28yo / Lean & Strong")
+    
     if df_today.empty:
-        st.warning("Log a workout first.")
+        st.warning("Training log empty. Complete the session first.")
     else:
-        if st.button("Generate Report ✨"):
-            with st.spinner("Analyzing..."):
+        if st.button("Analyze Performance ⚡"):
+            with st.spinner("Coach is reviewing the tapes..."):
+                # Fetch history for context
                 history_df = get_volume_history(muscle_target)
                 
-                prompt = f"""
-                Act as a strength coach. 
-                Target: {muscle_target}
-                Today's Data: {df_today.to_dict('records')}
+                # Convert DataFrame to list of dicts for the AI
+                todays_data_list = df_today.to_dict('records')
                 
-                DATA NOTES:
-                - Cardio: Weight=Distance, Reps=Time.
-                - Core (Timed): Weight=0, Reps=Seconds.
+                # CALL THE NEW BRAIN
+                analysis = coach.generate_analysis(
+                    muscle_target, 
+                    todays_data_list, 
+                    history_df, 
+                    MODEL_NAME
+                )
                 
-                Provide in Markdown:
-                1. **Efficiency Score** (1-10)
-                2. **Analysis**
-                3. **Recommendation**
-                Keep it under 100 words.
-                """
-                try:
-                    response = ollama.chat(model=MODEL_NAME, messages=[{'role': 'user', 'content': prompt}])
-                    st.markdown(response['message']['content'])
-                except Exception as e:
-                    st.error(f"AI Error: {e}")
+                st.markdown(analysis)
