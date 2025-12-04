@@ -9,7 +9,7 @@ import time
 DB_NAME = 'gym_data.db'
 MODEL_NAME = 'llama3.2' 
 
-# --- CUSTOM CSS (MOBILE OPTIMIZATION) ---
+# --- CUSTOM CSS ---
 st.set_page_config(page_title="Jetson Gym", page_icon="⚡", layout="centered")
 st.markdown("""
     <style>
@@ -48,17 +48,28 @@ def get_last_performance(exercise_name):
 
 def add_set(target, exercise, weight, reps, sets):
     conn = get_db_connection()
-    # SAVE AS ISO FORMAT (YYYY-MM-DD) to match python date
     conn.execute("INSERT INTO workout_logs (date, muscle_target, exercise_name, weight, reps, sets) VALUES (?, ?, ?, ?, ?, ?)",
               (date.today().isoformat(), target, exercise, weight, reps, sets))
     conn.commit()
     conn.close()
 
+def update_log(row_id, weight, reps, sets):
+    conn = get_db_connection()
+    conn.execute("UPDATE workout_logs SET weight = ?, reps = ?, sets = ? WHERE id = ?", 
+                 (weight, reps, sets, row_id))
+    conn.commit()
+    conn.close()
+
+def delete_log(row_id):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM workout_logs WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
 def get_todays_workout_df():
     conn = get_db_connection()
-    # QUERY WITH ISO FORMAT
     today_str = date.today().isoformat()
-    df = pd.read_sql_query("SELECT * FROM workout_logs WHERE date = ?", conn, params=(today_str,))
+    df = pd.read_sql_query("SELECT id, muscle_target, exercise_name, weight, reps, sets FROM workout_logs WHERE date = ?", conn, params=(today_str,))
     conn.close()
     return df
 
@@ -76,30 +87,31 @@ def get_volume_history(muscle_target):
     conn.close()
     return df
 
-# --- UI LAYOUT ---
-st.title("⚡ Jetson Gym")
-
-# --- HELPER: CARDIO UNITS ---
 def get_cardio_unit(exercise_name):
     name = exercise_name.lower()
     if "row" in name: return "m"
     if "stair" in name: return "floors"
     return "mi"
 
+# --- UI LAYOUT ---
+st.title("⚡ Jetson Gym")
+
 tab1, tab2, tab3 = st.tabs(["🏋️ WORKOUT", "📈 HISTORY", "🤖 COACH"])
 
 # --- TAB 1: THE WORKOUT ---
 with tab1:
-    muscle_target = st.radio("Focus Area", ["Chest", "Back", "Legs", "Shoulders", "Arms", "Cardio"], horizontal=True)
+    # 1. MUSCLE TARGET
+    muscle_target = st.radio("Focus Area", ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"], horizontal=True)
     st.divider()
 
-    # 1. PREPARE DATA & EXERCISE LIST
-    exercise_name = None
-    last_perf = None
+    # Logic flags
     is_cardio = (muscle_target == "Cardio")
-
+    is_core = (muscle_target == "Core")
+    
+    # 2. EXERCISE SELECTION
+    exercise_name = None
+    
     if is_cardio:
-        # Fixed Cardio List
         cardio_options = ["Incline Walk", "Treadmill Run", "Outdoor Run", "Row", "Stationary Bike", "Stair Master"]
         c_ex1, c_ex2 = st.columns([1, 2])
         mode = c_ex1.radio("Mode", ["List", "New"], label_visibility="collapsed")
@@ -108,7 +120,6 @@ with tab1:
         else:
             exercise_name = c_ex2.text_input("Name", placeholder="New Cardio", label_visibility="collapsed")
     else:
-        # Standard Weightlifting List
         known_exercises = get_unique_exercises(muscle_target)
         if known_exercises:
             c_ex1, c_ex2 = st.columns([1, 2])
@@ -118,119 +129,164 @@ with tab1:
             else:
                 exercise_name = c_ex2.text_input("Name", placeholder="New Exercise", label_visibility="collapsed")
         else:
-            exercise_name = st.text_input("Exercise Name", placeholder="e.g. Squat")
+            exercise_name = st.text_input("Exercise Name", placeholder="e.g. Plank")
 
-    # Get Previous Data
+    # 3. TYPE SELECTION (MOVED OUTSIDE FORM FOR INSTANT UPDATES)
+    core_type = "Weighted / Reps" # Default
+    if is_core:
+        # This now triggers an immediate page refresh when clicked
+        core_type = st.radio("Core Type", ["Weighted / Reps", "Timed (Plank)"], horizontal=True)
+
+    # 4. CONTEXT & DEFAULTS
+    last_perf = None
     if exercise_name:
         last_perf = get_last_performance(exercise_name)
         if last_perf:
             if is_cardio:
                 unit = get_cardio_unit(exercise_name)
                 st.info(f"📅 Last: **{last_perf['weight']} {unit}** in **{last_perf['reps']} mins**")
+            elif is_core and last_perf['weight'] == 0:
+                 st.info(f"📅 Last: **{last_perf['reps']} secs** (Timed)")
             else:
                 st.info(f"📅 Last: **{last_perf['weight']} lbs** x **{last_perf['reps']}**")
 
-    # 2. INPUT FORM (Smart Switching)
+    # 5. THE FORM
     with st.form("log_set_form"):
         c1, c2, c3 = st.columns(3)
         
-        # Defaults
-        def_val_1 = float(last_perf['weight']) if last_perf else 0.0
-        def_val_2 = int(last_perf['reps']) if last_perf else (30 if is_cardio else 8)
-        
-        if is_cardio:
-            # CARDIO INPUTS
-            unit = get_cardio_unit(exercise_name) if exercise_name else "mi"
-            
-            with c1: 
-                # Map Distance -> Weight Column
-                weight = st.number_input(f"Dist ({unit})", value=def_val_1, step=0.5)
-            with c2: 
-                # Map Time -> Reps Column
-                reps = st.number_input("Time (min)", value=def_val_2, step=1)
-            with c3: 
-                # Sets usually 1 for cardio
-                sets = st.number_input("Sets", value=1, disabled=True)
+        # Calculate Defaults
+        def_w = float(last_perf['weight']) if last_perf else 0.0
+        # If switching to Timed Core, default to 30s instead of rep count
+        if is_core and core_type == "Timed (Plank)":
+            def_r = int(last_perf['reps']) if last_perf and last_perf['weight'] == 0 else 30
         else:
-            # LIFTING INPUTS
-            with c1: weight = st.number_input("Lbs", value=def_val_1, step=5.0)
-            with c2: reps = st.number_input("Reps", value=def_val_2, step=1)
+            def_r = int(last_perf['reps']) if last_perf else 10
+        
+        # RENDER INPUTS BASED ON SELECTIONS
+        if is_cardio:
+            unit = get_cardio_unit(exercise_name) if exercise_name else "mi"
+            with c1: weight = st.number_input(f"Dist ({unit})", value=def_w, step=0.1)
+            with c2: reps = st.number_input("Time (min)", value=def_r, step=1)
+            with c3: sets = st.number_input("Sets", value=1, disabled=True)
+            
+        elif is_core:
+            if core_type == "Timed (Plank)":
+                with c1: weight = st.number_input("Weight", value=0.0, disabled=True)
+                # This label will now correctly show "Time (Secs)" immediately
+                with c2: reps = st.number_input("Time (Secs)", value=def_r, step=5)
+                with c3: sets = st.number_input("Sets", value=3, step=1)
+            else:
+                with c1: weight = st.number_input("Weight (lbs)", value=def_w, step=2.5)
+                with c2: reps = st.number_input("Reps", value=def_r, step=1)
+                with c3: sets = st.number_input("Sets", value=3, step=1)
+        
+        else:
+            # Standard Lifting
+            with c1: weight = st.number_input("Lbs", value=def_w, step=5.0)
+            with c2: reps = st.number_input("Reps", value=def_r, step=1)
             with c3: sets = st.number_input("Sets", value=3, step=1)
 
-        submitted = st.form_submit_button("LOG ACTIVITY ➕", type="primary")
+        submitted = st.form_submit_button("LOG SET ➕", type="primary")
         
         if submitted:
             if exercise_name:
                 add_set(muscle_target, exercise_name, weight, reps, sets)
-                st.toast(f"Saved {exercise_name}!", icon="🏃" if is_cardio else "🏋️")
+                st.toast(f"Saved {exercise_name}!", icon="✅")
                 time.sleep(0.5)
                 st.rerun()
             else:
                 st.error("Enter a name.")
 
-    # 3. LIVE SESSION VIEW
+    # 6. SESSION VIEW & MANAGER
     st.subheader("Today's Session")
     df_today = get_todays_workout_df() 
     
     if not df_today.empty:
-        # Calculate Volume (Logic depends on type)
-        # We just sum generic volume for the top metric, specific cards handle display
-        total_vol = (df_today['weight'] * df_today['reps'] * df_today['sets']).sum()
-        exercises_count = df_today['exercise_name'].nunique()
+        edit_mode = st.toggle("✏️ Manager Mode (Edit / Delete)")
         
-        c1, c2 = st.columns(2)
-        c1.metric("Total Load", f"{int(total_vol):,}")
-        c2.metric("Exercises", exercises_count)
+        if edit_mode:
+            st.caption("Edit values directly below. Uncheck to save/view.")
+            edited_df = st.data_editor(
+                df_today, 
+                column_config={
+                    "id": None,
+                    "muscle_target": st.column_config.TextColumn(disabled=True),
+                    "exercise_name": st.column_config.TextColumn(disabled=True),
+                },
+                num_rows="dynamic",
+                key="editor"
+            )
+            
+            if st.button("💾 Apply Changes"):
+                original_ids = set(df_today['id'])
+                current_ids = set(edited_df['id'])
+                
+                # Deletions
+                deleted_ids = original_ids - current_ids
+                for row_id in deleted_ids:
+                    delete_log(row_id)
+                
+                # Updates
+                for index, row in edited_df.iterrows():
+                    update_log(row['id'], row['weight'], row['reps'], row['sets'])
+                
+                st.toast("Logs Updated!", icon="💾")
+                time.sleep(0.5)
+                st.rerun()
         
-        st.markdown("---")
-
-        unique_exercises = df_today['exercise_name'].unique()
-        
-        for ex_name in unique_exercises[::-1]:  # Reverse order for recent first
-            ex_data = df_today[df_today['exercise_name'] == ex_name]
+        else:
+            # View Mode
+            total_vol = (df_today['weight'] * df_today['reps'] * df_today['sets']).sum()
+            c1, c2 = st.columns(2)
+            c1.metric("Total Load", f"{int(total_vol):,}")
+            c2.metric("Exercises", df_today['exercise_name'].nunique())
             
-            # Check if this specific exercise row is cardio
-            # We check the first row of this group to determine type
-            is_ex_cardio = ex_data.iloc[0]['muscle_target'] == "Cardio"
-            unit = get_cardio_unit(ex_name) if is_ex_cardio else "lbs"
+            st.markdown("---")
+            unique_exercises = df_today['exercise_name'].unique()
             
-            total_sets_ex = ex_data['sets'].sum()
-            best_stat = ex_data['weight'].max() # Max Distance or Max Weight
+            for ex_name in unique_exercises[::-1]:
+                ex_data = df_today[df_today['exercise_name'] == ex_name]
+                
+                first_row = ex_data.iloc[0]
+                is_ex_cardio = first_row['muscle_target'] == "Cardio"
+                is_ex_core = first_row['muscle_target'] == "Core"
+                unit = get_cardio_unit(ex_name) if is_ex_cardio else "lbs"
+                
+                total_sets_ex = ex_data['sets'].sum()
 
-            set_rows_html = ""
-            set_counter = 1
-            
-            for _, row in ex_data.iterrows():
-                current_sets = int(row['sets'])
-                for _ in range(current_sets):
-                    
-                    # FORMATTING LOGIC
-                    if is_ex_cardio:
-                        # Cardio Format: "3.5 mi in 30 mins"
-                        display_text = f'{row["weight"]} {unit} <span style="color: #666; font-weight: normal;">in {row["reps"]} mins</span>'
-                    else:
-                        # Lifting Format: "135 lbs x 10"
-                        display_text = f'{row["weight"]} lbs <span style="color: #666; font-weight: normal;">x {row["reps"]}</span>'
+                set_rows_html = ""
+                set_counter = 1
+                
+                for _, row in ex_data.iterrows():
+                    current_sets = int(row['sets'])
+                    for _ in range(current_sets):
+                        
+                        if is_ex_cardio:
+                            display_text = f'{row["weight"]} {unit} <span style="color: #666;">in {row["reps"]} min</span>'
+                        elif is_ex_core and row['weight'] == 0:
+                            display_text = f'{row["reps"]} <span style="color: #666;">secs</span>'
+                        else:
+                            display_text = f'{row["weight"]} lbs <span style="color: #666;">x {row["reps"]}</span>'
 
-                    set_rows_html += (
-                        f'<div style="display: flex; justify-content: space-between; border-bottom: 1px solid #333; padding: 4px 0;">'
-                        f'<span style="color: #888; font-size: 0.9em;">Set {set_counter}</span>'
-                        f'<span style="color: #FFF; font-weight: bold;">{display_text}</span>'
-                        f'</div>'
-                    )
-                    set_counter += 1
+                        set_rows_html += (
+                            f'<div style="display: flex; justify-content: space-between; border-bottom: 1px solid #333; padding: 4px 0;">'
+                            f'<span style="color: #888; font-size: 0.9em;">Set {set_counter}</span>'
+                            f'<span style="color: #FFF; font-weight: bold;">{display_text}</span>'
+                            f'</div>'
+                        )
+                        set_counter += 1
 
-            st.markdown(f"""
-            <div style="background-color: #1E1E1E; border-radius: 12px; padding: 15px; margin-bottom: 15px; border-left: 4px solid #FF4B4B; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h3 style="margin: 0; padding: 0; color: #FAFAFA; font-size: 1.2rem;">{ex_name}</h3>
-                    <span style="background: #333; color: #FFF; padding: 2px 8px; border-radius: 4px; font-size: 0.8em;">{total_sets_ex} Sets</span>
+                st.markdown(f"""
+                <div style="background-color: #1E1E1E; border-radius: 12px; padding: 15px; margin-bottom: 15px; border-left: 4px solid #FF4B4B;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h3 style="margin: 0; color: #FAFAFA; font-size: 1.2rem;">{ex_name}</h3>
+                        <span style="background: #333; color: #FFF; padding: 2px 8px; border-radius: 4px; font-size: 0.8em;">{total_sets_ex} Sets</span>
+                    </div>
+                    <div style="background: #262626; border-radius: 8px; padding: 10px;">{set_rows_html}</div>
                 </div>
-                <div style="background: #262626; border-radius: 8px; padding: 10px;">{set_rows_html}</div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
     else:
-        st.info("Workout empty. Go lift something.")
+        st.info("No logs today.")
 
 # --- TAB 2: HISTORY ---
 with tab2:
@@ -257,26 +313,22 @@ with tab3:
         if st.button("Generate Report ✨"):
             with st.spinner("Analyzing..."):
                 history_df = get_volume_history(muscle_target)
-                prev_volume = history_df.iloc[-2]['total_volume'] if len(history_df) > 1 else 0
                 
-                # Update prompt to explain Cardio data mapping
                 prompt = f"""
-                Act as a strength and conditioning coach. 
-                
+                Act as a strength coach. 
                 Target: {muscle_target}
-                Today's Workout Data: {df_today.to_dict('records')}
+                Today's Data: {df_today.to_dict('records')}
                 
-                NOTE ON DATA:
-                - If Target is 'Cardio': 'weight' = Distance, 'reps' = Minutes.
-                - If Target is 'Weightlifting': 'weight' = Lbs, 'reps' = Reps.
+                DATA NOTES:
+                - Cardio: Weight=Distance, Reps=Time.
+                - Core (Timed): Weight=0, Reps=Seconds.
                 
                 Provide in Markdown:
                 1. **Efficiency Score** (1-10)
-                2. **Analysis**: (Pacing/Intensity/Volume)
-                3. **Recommendation**: (Specific adjustment for next time)
+                2. **Analysis**
+                3. **Recommendation**
                 Keep it under 100 words.
                 """
-                
                 try:
                     response = ollama.chat(model=MODEL_NAME, messages=[{'role': 'user', 'content': prompt}])
                     st.markdown(response['message']['content'])
