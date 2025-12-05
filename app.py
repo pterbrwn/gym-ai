@@ -291,15 +291,31 @@ with tab1:
 
 # --- TAB 2: HISTORY ---
 with tab2:
-    st.subheader(f"Progress: {muscle_target}")
-    vol_df = get_volume_history(muscle_target)
+    # 1. Add a specific selector for History (Defaults to the one selected in Tab 1)
+    # We use index matching to set the default value
+    all_muscles = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"]
+    default_ix = all_muscles.index(muscle_target) if muscle_target in all_muscles else 0
+    
+    history_target = st.selectbox("Graph Focus Area", all_muscles, index=default_ix)
+    
+    # 2. Get Data for the SELECTED history target, not the Tab 1 target
+    vol_df = get_volume_history(history_target)
+    
+    st.subheader(f"Volume Progression: {history_target}")
     
     if not vol_df.empty:
-        st.area_chart(vol_df.set_index('date'))
+        # Check if we have enough data for a line
+        if len(vol_df) < 2:
+            st.warning("Not enough data to draw a line yet. (Need workouts on 2 different days).")
+            # Show a bar chart instead if only 1 day exists, so it's not invisible
+            st.bar_chart(vol_df.set_index('date'))
+        else:
+            st.area_chart(vol_df.set_index('date'))
     else:
-        st.info("Log more workouts to see charts!")
+        st.info(f"No history found for {history_target}.")
 
-    st.subheader("Raw Data")
+    st.divider()
+    st.subheader("Raw Logbook")
     conn = get_db_connection()
     all_logs = pd.read_sql_query("SELECT * FROM workout_logs ORDER BY date DESC LIMIT 50", conn)
     st.dataframe(all_logs, hide_index=True)
