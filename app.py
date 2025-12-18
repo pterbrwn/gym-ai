@@ -1,31 +1,64 @@
 import streamlit as st
 import sqlite3
-import ollama
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 import time
-import coach
+import coach  # Ensure coach.py is in your directory
+import re
 
 # --- CONFIGURATION ---
-DB_NAME = 'gym_data.db'
-MODEL_NAME = 'llama3.2' 
+st.set_page_config(
+    page_title="JETSON ELITE", 
+    page_icon="💎", 
+    layout="wide", 
+    initial_sidebar_state="collapsed"
+)
 
-# --- CUSTOM CSS ---
-st.set_page_config(page_title="Jetson Gym", page_icon="⚡", layout="centered")
+# --- ELITE UI STYLING ---
 st.markdown("""
     <style>
-    .stButton>button {
-        width: 100%;
-        height: 3.5em;
-        font-weight: bold; 
-        border-radius: 12px;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: #FFFFFF; }
+    .stApp { background-color: #080808; }
+    
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #080808; }
+    ::-webkit-scrollbar-thumb { background: #333; }
+
+    h1 { font-weight: 900 !important; letter-spacing: -3px !important; text-transform: uppercase; margin-top: -40px !important; }
+    .sub-brand { color: #444; font-size: 0.75rem; letter-spacing: 5px; text-transform: uppercase; margin-bottom: 30px; }
+
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; border-bottom: 1px solid #111; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent !important;
+        color: #444 !important;
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 1px;
     }
+    .stTabs [aria-selected="true"] { color: #FFFFFF !important; border-bottom: 2px solid #FFFFFF !important; }
+
+    div[data-testid="stForm"] { border: 1px solid #1a1a1a !important; border-radius: 4px !important; background-color: #0c0c0c !important; }
+    
+    .stButton>button {
+        width: 100%; border-radius: 4px; height: 3.5em; background: #FFFFFF !important; color: #000 !important;
+        font-weight: 900; text-transform: uppercase; letter-spacing: 2px; border: none; transition: 0.3s ease;
+    }
+    
+    [data-testid="stMetric"] { background: #0c0c0c; border: 1px solid #1a1a1a; padding: 15px; border-radius: 4px; }
+    div[data-testid="stDataEditor"] { border: 1px solid #1a1a1a !important; }
+
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     </style>
 """, unsafe_allow_html=True)
 
 # --- DATABASE ENGINE ---
+DB_NAME = 'gym_data.db'
+MODEL_NAME = 'qwen2.5:7b' 
+
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -39,25 +72,21 @@ def get_unique_exercises(muscle_group):
 
 def get_last_performance(exercise_name):
     conn = get_db_connection()
-    data = conn.execute("""
-        SELECT weight, reps, date FROM workout_logs 
-        WHERE exercise_name = ? 
-        ORDER BY date DESC LIMIT 1
-    """, (exercise_name,)).fetchone()
+    data = conn.execute("SELECT weight, reps, date FROM workout_logs WHERE exercise_name = ? ORDER BY date DESC LIMIT 1", (exercise_name,)).fetchone()
     conn.close()
     return data
 
-def add_set(target, exercise, weight, reps, sets):
+def add_set(target, exercise, weight, reps, sets, log_date):
     conn = get_db_connection()
+    date_str = log_date.isoformat() if isinstance(log_date, date) else log_date
     conn.execute("INSERT INTO workout_logs (date, muscle_target, exercise_name, weight, reps, sets) VALUES (?, ?, ?, ?, ?, ?)",
-              (date.today().isoformat(), target, exercise, weight, reps, sets))
+              (date_str, target, exercise, weight, reps, sets))
     conn.commit()
     conn.close()
 
 def update_log(row_id, weight, reps, sets):
     conn = get_db_connection()
-    conn.execute("UPDATE workout_logs SET weight = ?, reps = ?, sets = ? WHERE id = ?", 
-                 (weight, reps, sets, row_id))
+    conn.execute("UPDATE workout_logs SET weight = ?, reps = ?, sets = ? WHERE id = ?", (weight, reps, sets, row_id))
     conn.commit()
     conn.close()
 
@@ -67,284 +96,170 @@ def delete_log(row_id):
     conn.commit()
     conn.close()
 
-def get_todays_workout_df():
+def get_workout_df(start_date, end_date=None):
     conn = get_db_connection()
-    today_str = date.today().isoformat()
-    df = pd.read_sql_query("SELECT id, muscle_target, exercise_name, weight, reps, sets FROM workout_logs WHERE date = ?", conn, params=(today_str,))
+    if end_date:
+        query = "SELECT id, date, muscle_target, exercise_name, weight, reps, sets FROM workout_logs WHERE date BETWEEN ? AND ?"
+        df = pd.read_sql_query(query, conn, params=(start_date.isoformat(), end_date.isoformat()))
+    else:
+        query = "SELECT id, date, muscle_target, exercise_name, weight, reps, sets FROM workout_logs WHERE date = ?"
+        df = pd.read_sql_query(query, conn, params=(start_date.isoformat(),))
     conn.close()
     return df
 
 def get_volume_history(muscle_target):
     conn = get_db_connection()
-    query = """
-    SELECT date, SUM(weight * reps * sets) as total_volume 
-    FROM workout_logs 
-    WHERE muscle_target = ? 
-    GROUP BY date 
-    ORDER BY date ASC
-    LIMIT 20
-    """
-    df = pd.read_sql_query(query, conn, params=(muscle_target,))
+    if muscle_target == "All":
+        query = "SELECT date, SUM(weight * reps * sets) as total_volume FROM workout_logs GROUP BY date ORDER BY date ASC"
+        df = pd.read_sql_query(query, conn)
+    else:
+        query = "SELECT date, SUM(weight * reps * sets) as total_volume FROM workout_logs WHERE muscle_target = ? GROUP BY date ORDER BY date ASC"
+        df = pd.read_sql_query(query, conn, params=(muscle_target,))
     conn.close()
     return df
 
-def get_cardio_unit(exercise_name):
-    name = exercise_name.lower()
-    if "row" in name: return "m"
-    if "stair" in name: return "floors"
-    return "mi"
+# --- THE ELITE ANALYTICS PARSER ---
+def display_elite_analysis(analysis, range_label="SESSION"):
+    # CLEANING: Remove any markdown code blocks the AI might have wrapped the text in
+    analysis = analysis.replace("```markdown", "").replace("```", "").strip()
 
-# --- UI LAYOUT ---
-st.title("⚡ Jetson Gym")
+    st.markdown(f"""
+        <div style="text-align: center; margin: 40px 0;">
+            <h1 style="font-size: 3rem; color: #fff;">THE VERDICT</h1>
+            <p style="color: #444; letter-spacing: 5px;">{range_label} INTELLIGENCE REPORT</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["🏋️ WORKOUT", "📈 HISTORY", "🤖 COACH"])
+    # Statistical Extraction
+    grade = re.search(r'Intensity:\s*\**(\d+)/10\**', analysis)
+    load = re.search(r'Load:\*\*\s*([\d,]+)', analysis)
+    delta = re.search(r'Increase:\s*~?(\d+)%', analysis)
 
-# --- TAB 1: THE WORKOUT ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("KPI: INTENSITY", f"{grade.group(1)}/10" if grade else "8/10")
+    c2.metric("KPI: TOTAL LOAD", f"{load.group(1)} LBS" if load else "---")
+    c3.metric("KPI: PROGRESS", f"+{delta.group(1)}%" if delta else "+0%")
+
+    # Robust String Splitting for the Briefing
+    # We split by 'Tactical Analysis' or fallback to the second half of the response
+    if "Tactical Analysis" in analysis:
+        parts = analysis.split("Tactical Analysis")
+        summary_raw = parts[0]
+        tactical_raw = parts[1]
+    else:
+        summary_raw = analysis
+        tactical_raw = ""
+
+    # Clean the summary: strip the "Intensity: X/10" line which looks messy in the briefing
+    summary_clean = re.sub(r'Intensity:.*?\n', '', summary_raw).strip()
+    # Remove any stray leading hashes/headers
+    summary_clean = re.sub(r'^#+.*?\n', '', summary_clean).strip()
+
+    st.markdown(f"""
+        <div style="background: #0c0c0c; border-left: 2px solid #fff; padding: 2.5rem; margin: 2rem 0; border-radius: 0 4px 4px 0;">
+            <p style="color: #444; font-size: 0.7rem; text-transform: uppercase; margin-bottom: 15px; letter-spacing: 2px;">Executive Briefing</p>
+            <p style="font-size: 1.3rem; line-height: 1.6; font-style: italic; color: #FAFAFA;">"{summary_clean}"</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    if tactical_raw:
+        # Sanitize Markdown artifacts for a Billionaire look
+        tactical_html = tactical_raw.replace("- **", "<strong>").replace("**", "</strong>").replace("\n- ", "<br>• ")
+        # Ensure we don't have stray hashes
+        tactical_html = tactical_html.replace("#", "")
+        
+        st.markdown(f"""
+            <div style="background: #050505; border: 1px solid #111; padding: 2rem; border-radius: 4px;">
+                <p style="color: #444; font-weight: 700; text-transform: uppercase; font-size: 0.7rem; margin-bottom: 15px; letter-spacing: 1px;">Tactical Drilldown</p>
+                <div style="color: #888; font-size: 1rem; line-height: 1.8; font-family: 'JetBrains Mono';">{tactical_html}</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+# --- UI LOGIC ---
+st.markdown("<h1>JETSON ELITE</h1>", unsafe_allow_html=True)
+st.markdown("<p class='sub-brand'>Tier 1 Human Performance System</p>", unsafe_allow_html=True)
+
+tab1, tab2, tab3 = st.tabs(["MANIFEST", "ANALYTICS", "COACH"])
+
 with tab1:
-    # 1. MUSCLE TARGET
-    muscle_target = st.radio("Focus Area", ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"], horizontal=True)
-    st.divider()
-
-    # Logic flags
-    is_cardio = (muscle_target == "Cardio")
-    is_core = (muscle_target == "Core")
+    col_date, col_spacer = st.columns([1, 2])
+    target_date = col_date.date_input("LOGGING WINDOW", value=date.today())
     
-    # 2. EXERCISE SELECTION
-    exercise_name = None
-    
-    if is_cardio:
-        cardio_options = ["Incline Walk", "Treadmill Run", "Outdoor Run", "Row", "Stationary Bike", "Stair Master"]
-        c_ex1, c_ex2 = st.columns([1, 2])
-        mode = c_ex1.radio("Mode", ["List", "New"], label_visibility="collapsed")
-        if mode == "List":
-            exercise_name = c_ex2.selectbox("Exercise", cardio_options, label_visibility="collapsed")
-        else:
-            exercise_name = c_ex2.text_input("Name", placeholder="New Cardio", label_visibility="collapsed")
-    else:
-        known_exercises = get_unique_exercises(muscle_target)
-        if known_exercises:
-            c_ex1, c_ex2 = st.columns([1, 2])
-            mode = c_ex1.radio("Mode", ["List", "New"], label_visibility="collapsed")
-            if mode == "List":
-                exercise_name = c_ex2.selectbox("Exercise", known_exercises, label_visibility="collapsed")
-            else:
-                exercise_name = c_ex2.text_input("Name", placeholder="New Exercise", label_visibility="collapsed")
-        else:
-            exercise_name = st.text_input("Exercise Name", placeholder="e.g. Plank")
-
-    # 3. TYPE SELECTION (MOVED OUTSIDE FORM FOR INSTANT UPDATES)
-    core_type = "Weighted / Reps" # Default
-    if is_core:
-        # This now triggers an immediate page refresh when clicked
-        core_type = st.radio("Core Type", ["Weighted / Reps", "Timed (Plank)"], horizontal=True)
-
-    # 4. CONTEXT & DEFAULTS
-    last_perf = None
-    if exercise_name:
-        last_perf = get_last_performance(exercise_name)
-        if last_perf:
-            if is_cardio:
-                unit = get_cardio_unit(exercise_name)
-                st.info(f"📅 Last: **{last_perf['weight']} {unit}** in **{last_perf['reps']} mins**")
-            elif is_core and last_perf['weight'] == 0:
-                 st.info(f"📅 Last: **{last_perf['reps']} secs** (Timed)")
-            else:
-                st.info(f"📅 Last: **{last_perf['weight']} lbs** x **{last_perf['reps']}**")
-
-    # 5. THE FORM
-    with st.form("log_set_form"):
-        c1, c2, c3 = st.columns(3)
+    with st.form("set_entry", clear_on_submit=True):
+        col_target, col_ex, col_w, col_r, col_s = st.columns([1.2, 2, 1, 1, 1])
+        with col_target: 
+            target = st.selectbox("PROTOCOL", ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"])
+        with col_ex:
+            known = get_unique_exercises(target)
+            is_new = st.toggle("NEW", key="new_ex_toggle")
+            ex_name = st.text_input("NAME", placeholder="Exercise Name") if is_new else st.selectbox("NAME", known if known else ["Register New"])
         
-        # Calculate Defaults
-        def_w = float(last_perf['weight']) if last_perf else 0.0
-        # If switching to Timed Core, default to 30s instead of rep count
-        if is_core and core_type == "Timed (Plank)":
-            def_r = int(last_perf['reps']) if last_perf and last_perf['weight'] == 0 else 30
-        else:
-            def_r = int(last_perf['reps']) if last_perf else 10
+        last = get_last_performance(ex_name) if ex_name else None
+        with col_w: weight = st.number_input("LBS", value=float(last['weight']) if last else 0.0, step=5.0)
+        with col_r: reps = st.number_input("REPS", value=int(last['reps']) if last else 10, step=1)
+        with col_s: sets = st.number_input("SETS", value=3, step=1)
         
-        # RENDER INPUTS BASED ON SELECTIONS
-        if is_cardio:
-            unit = get_cardio_unit(exercise_name) if exercise_name else "mi"
-            with c1: weight = st.number_input(f"Dist ({unit})", value=def_w, step=0.1)
-            with c2: reps = st.number_input("Time (min)", value=def_r, step=1)
-            with c3: sets = st.number_input("Sets", value=1, disabled=True)
-            
-        elif is_core:
-            if core_type == "Timed (Plank)":
-                with c1: weight = st.number_input("Weight", value=0.0, disabled=True)
-                # This label will now correctly show "Time (Secs)" immediately
-                with c2: reps = st.number_input("Time (Secs)", value=def_r, step=5)
-                with c3: sets = st.number_input("Sets", value=3, step=1)
-            else:
-                with c1: weight = st.number_input("Weight (lbs)", value=def_w, step=2.5)
-                with c2: reps = st.number_input("Reps", value=def_r, step=1)
-                with c3: sets = st.number_input("Sets", value=3, step=1)
-        
-        else:
-            # Standard Lifting
-            with c1: weight = st.number_input("Lbs", value=def_w, step=5.0)
-            with c2: reps = st.number_input("Reps", value=def_r, step=1)
-            with c3: sets = st.number_input("Sets", value=3, step=1)
-
-        submitted = st.form_submit_button("LOG SET ➕", type="primary")
-        
-        if submitted:
-            if exercise_name:
-                add_set(muscle_target, exercise_name, weight, reps, sets)
-                st.toast(f"Saved {exercise_name}!", icon="✅")
-                time.sleep(0.5)
+        if st.form_submit_button("COMMIT PERFORMANCE"):
+            if ex_name and ex_name != "Register New":
+                add_set(target, ex_name, weight, reps, sets, target_date)
                 st.rerun()
-            else:
-                st.error("Enter a name.")
 
-    # 6. SESSION VIEW & MANAGER
-    st.subheader("Today's Session")
-    df_today = get_todays_workout_df() 
+    st.write("")
     
-    if not df_today.empty:
-        edit_mode = st.toggle("✏️ Manager Mode (Edit / Delete)")
+    df_manifest = get_workout_df(target_date)
+    if not df_manifest.empty:
+        st.markdown(f"### SESSION MANIFEST: {target_date.strftime('%d %b %Y')}")
+        edited = st.data_editor(
+            df_manifest,
+            column_config={
+                "id": None, "date": None,
+                "muscle_target": st.column_config.TextColumn("AREA", disabled=True),
+                "exercise_name": st.column_config.TextColumn("PROTOCOL", disabled=True),
+                "weight": st.column_config.NumberColumn("LBS"),
+                "reps": st.column_config.NumberColumn("REPS"),
+                "sets": st.column_config.NumberColumn("SETS"),
+            },
+            num_rows="dynamic", use_container_width=True, key="manifest_editor"
+        )
         
-        if edit_mode:
-            st.caption("Edit values directly below. Uncheck to save/view.")
-            edited_df = st.data_editor(
-                df_today, 
-                column_config={
-                    "id": None,
-                    "muscle_target": st.column_config.TextColumn(disabled=True),
-                    "exercise_name": st.column_config.TextColumn(disabled=True),
-                },
-                num_rows="dynamic",
-                key="editor"
-            )
-            
-            if st.button("💾 Apply Changes"):
-                original_ids = set(df_today['id'])
-                current_ids = set(edited_df['id'])
-                
-                # Deletions
-                deleted_ids = original_ids - current_ids
-                for row_id in deleted_ids:
-                    delete_log(row_id)
-                
-                # Updates
-                for index, row in edited_df.iterrows():
-                    update_log(row['id'], row['weight'], row['reps'], row['sets'])
-                
-                st.toast("Logs Updated!", icon="💾")
-                time.sleep(0.5)
-                st.rerun()
-        
-        else:
-            # View Mode
-            total_vol = (df_today['weight'] * df_today['reps'] * df_today['sets']).sum()
-            c1, c2 = st.columns(2)
-            c1.metric("Total Load", f"{int(total_vol):,}")
-            c2.metric("Exercises", df_today['exercise_name'].nunique())
-            
-            st.markdown("---")
-            unique_exercises = df_today['exercise_name'].unique()
-            
-            for ex_name in unique_exercises[::-1]:
-                ex_data = df_today[df_today['exercise_name'] == ex_name]
-                
-                first_row = ex_data.iloc[0]
-                is_ex_cardio = first_row['muscle_target'] == "Cardio"
-                is_ex_core = first_row['muscle_target'] == "Core"
-                unit = get_cardio_unit(ex_name) if is_ex_cardio else "lbs"
-                
-                total_sets_ex = ex_data['sets'].sum()
-
-                set_rows_html = ""
-                set_counter = 1
-                
-                for _, row in ex_data.iterrows():
-                    current_sets = int(row['sets'])
-                    for _ in range(current_sets):
-                        
-                        if is_ex_cardio:
-                            display_text = f'{row["weight"]} {unit} <span style="color: #666;">in {row["reps"]} min</span>'
-                        elif is_ex_core and row['weight'] == 0:
-                            display_text = f'{row["reps"]} <span style="color: #666;">secs</span>'
-                        else:
-                            display_text = f'{row["weight"]} lbs <span style="color: #666;">x {row["reps"]}</span>'
-
-                        set_rows_html += (
-                            f'<div style="display: flex; justify-content: space-between; border-bottom: 1px solid #333; padding: 4px 0;">'
-                            f'<span style="color: #888; font-size: 0.9em;">Set {set_counter}</span>'
-                            f'<span style="color: #FFF; font-weight: bold;">{display_text}</span>'
-                            f'</div>'
-                        )
-                        set_counter += 1
-
-                st.markdown(f"""
-                <div style="background-color: #1E1E1E; border-radius: 12px; padding: 15px; margin-bottom: 15px; border-left: 4px solid #FF4B4B;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <h3 style="margin: 0; color: #FAFAFA; font-size: 1.2rem;">{ex_name}</h3>
-                        <span style="background: #333; color: #FFF; padding: 2px 8px; border-radius: 4px; font-size: 0.8em;">{total_sets_ex} Sets</span>
-                    </div>
-                    <div style="background: #262626; border-radius: 8px; padding: 10px;">{set_rows_html}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        if st.button("SAVE CHANGES"):
+            orig_ids = set(df_manifest['id'])
+            curr_ids = set(edited['id'])
+            for rid in (orig_ids - curr_ids): delete_log(rid)
+            for _, row in edited.iterrows():
+                if row['id'] in orig_ids: update_log(row['id'], row['weight'], row['reps'], row['sets'])
+            st.toast("Database Synchronized.", icon="💎")
+            time.sleep(0.5)
+            st.rerun()
     else:
-        st.info("No logs today.")
+        st.caption(f"No records found for selected window: {target_date}")
 
-# --- TAB 2: HISTORY ---
 with tab2:
-    # 1. Add a specific selector for History (Defaults to the one selected in Tab 1)
-    # We use index matching to set the default value
-    all_muscles = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"]
-    default_ix = all_muscles.index(muscle_target) if muscle_target in all_muscles else 0
-    
-    history_target = st.selectbox("Graph Focus Area", all_muscles, index=default_ix)
-    
-    # 2. Get Data for the SELECTED history target, not the Tab 1 target
-    vol_df = get_volume_history(history_target)
-    
-    st.subheader(f"Volume Progression: {history_target}")
-    
-    if not vol_df.empty:
-        # Check if we have enough data for a line
-        if len(vol_df) < 2:
-            st.warning("Not enough data to draw a line yet. (Need workouts on 2 different days).")
-            # Show a bar chart instead if only 1 day exists, so it's not invisible
-            st.bar_chart(vol_df.set_index('date'))
-        else:
-            st.area_chart(vol_df.set_index('date'))
+    st.markdown("### PERFORMANCE TRENDS")
+    hist_target = st.selectbox("FOCUS AREA", ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Cardio"], key="hist_select")
+    v_df = get_volume_history(hist_target)
+    if not v_df.empty:
+        st.area_chart(v_df.set_index('date'), color="#ffffff")
     else:
-        st.info(f"No history found for {history_target}.")
+        st.info("Insufficient longitudinal data for plotting.")
 
-    st.divider()
-    st.subheader("Raw Logbook")
-    conn = get_db_connection()
-    all_logs = pd.read_sql_query("SELECT * FROM workout_logs ORDER BY date DESC LIMIT 50", conn)
-    st.dataframe(all_logs, hide_index=True)
-    conn.close()
-
-# --- TAB 3: COACH ---
 with tab3:
-    st.header("🧠 Performance Review")
+    st.markdown("### BOARDROOM REVIEW")
+    review_window = st.date_input("SELECT REVIEW WINDOW", value=(date.today() - timedelta(days=6), date.today()))
     
-    # Show a "Profile Badge" so you know the AI knows who you are
-    st.caption("Athlete Profile: D1 Soccer / 28yo / Lean & Strong")
-    
-    if df_today.empty:
-        st.warning("Training log empty. Complete the session first.")
-    else:
-        if st.button("Analyze Performance ⚡"):
-            with st.spinner("Coach is reviewing the tapes..."):
-                # Fetch history for context
-                history_df = get_volume_history(muscle_target)
-                
-                # Convert DataFrame to list of dicts for the AI
-                todays_data_list = df_today.to_dict('records')
-                
-                # CALL THE NEW BRAIN
-                analysis = coach.generate_analysis(
-                    muscle_target, 
-                    todays_data_list, 
-                    history_df, 
-                    MODEL_NAME
-                )
-                
-                st.markdown(analysis)
+    if len(review_window) == 2:
+        start, end = review_window
+        df_range = get_workout_df(start, end)
+        
+        if df_range.empty:
+            st.warning("No performance data found in selected window.")
+        else:
+            if st.button("GENERATE EXECUTIVE ANALYSIS"):
+                with st.spinner("Synthesizing Training Camp Data..."):
+                    analysis_report = coach.generate_analysis(
+                        "Training Period", 
+                        df_range.to_dict('records'), 
+                        get_volume_history("All"), 
+                        MODEL_NAME
+                    )
+                    display_elite_analysis(analysis_report, range_label="PERIODIC")

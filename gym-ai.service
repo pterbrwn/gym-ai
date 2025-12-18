@@ -1,0 +1,16 @@
+[Unit]
+Description=Gym AI Streamlit App
+After=network.target
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter/gym-ai
+Environment=PATH=/home/peter/gym-ai/venv/bin
+Environment=PYTHONPATH=/home/peter/gym-ai
+ExecStart=/home/peter/gym-ai/venv/bin/streamlit run app.py --server.port 8502 --server.address 0.0.0.0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

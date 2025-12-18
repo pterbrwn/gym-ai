@@ -11,7 +11,7 @@ User Profile:
 - Struggle: Diet/Nutrition.
 """
 
-def generate_analysis(muscle_target, todays_data, history_df, model_name='llama3.2'):
+def generate_analysis(muscle_target, todays_data, history_df, model_name='qwen2.5:7b'):
     
     # 1. Calculate Data Context
     # We summarize the data in Python first so the AI doesn't have to do math
